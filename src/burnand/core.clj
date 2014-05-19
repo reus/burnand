@@ -14,17 +14,19 @@
             [monger.operators :as mo]
             [clojure.data.json :as json]
             [clj-pdf.core :as pdf]
+            [burnand.settings :as settings]
             [ring.util.response :as resp])
   (:import (java.io FileInputStream)))
 
-(def custom-formatter (tmf/formatter "d MMMM yyyy"))
-(def custom-formatter-short (tmf/formatter "dd-MM-yyyy"))
+(def date-format (tmf/formatter "d MMMM yyyy"))
+(def date-format-short (tmf/formatter "dd-MM-yyyy"))
+
+(def date-string-today (tmf/unparse date-format-short (tm/now)))
 
 (defn date-short [date]
- (let [custom-formatter-short (tmf/formatter "dd-MM-yyyy")]
-   (tmf/unparse (tmf/with-zone custom-formatter-short
+   (tmf/unparse (tmf/with-zone date-format-short
                   (tm/time-zone-for-id "Europe/Paris"))
-                date)))
+                date))
 
 (def local-mongo "mongodb://burnand:burnand@localhost/burnand")
 
@@ -148,7 +150,7 @@
                                               (query-bookings)]
                                       [:tr.value] (html/set-attr :id (int id))
                                       [:.name] (html/content nm)
-                                      [:.check-in-date] (html/content (tmf/unparse custom-formatter check-in-date))
+                                      [:.check-in-date] (html/content (tmf/unparse date-format check-in-date))
                                       [:.rooms] (html/content (rooms-per-booking booking))))
 
 (html/deftemplate ring-booking-details "public/booking.html" [booking]
@@ -161,7 +163,7 @@
   [:.country :.value] (html/content (booking :country))
   [:.row.night.value] (html/clone-for [night (filter #(= (:type %) "room") (booking :products))]
                 [:.row.night] (html/add-class (night :room))
-                [:.date] (html/content (tmf/unparse custom-formatter-short (night :date)))
+                [:.date] (html/content (date-short (night :date)))
                 [:.room :span] (html/content (id-to-room-name (night :room)))
                 [:.room :select :option] (html/clone-for [{id :_id room-name :name}
                                                           (sort #(compare (:order %1) (:order %2)) (query-rooms))]
@@ -190,26 +192,21 @@
                               (let [type-order {"room" 1 "dinner" 2 "product" 3}]
                                 (< (type-order (:type x)) (type-order (:type y)))))))))
 
-(defn invoice-header [booking show-borders]
+(defn invoice-header [booking date-string show-borders]
   [:table {:border show-borders :cell-border show-borders}
    ["" "" "" "" "" ""]
    [
     [:cell {:colspan 2 :rowspan 2} [:image {:width 123 :height 107}
                                     "resources/public/images/logo_burnand_bw.jpg"]]
     [:cell {:colspan 2 :align :center}
-     [:chunk (str "2 Place de 'Église"
-                  "\n71460 Burnand"
-                  "\nTel: 038 592 6711"
-                  "\nwww.chateaudeburnand.net")]]
+     [:chunk settings/address]]
     [:cell {:colspan 2 :align :right}
      [:chunk {:size 38 :color [77 77 77]} "\nFacture"]]]
-   [[:cell {:colspan 2 :align :center} [:chunk (str "Jeane Seah"
-                                                    "\nSIRET 79202931600017"
-                                                    )]]
+   [[:cell {:colspan 2 :align :center} [:chunk settings/siret]]
     [:cell {:align :right}
      [:chunk {:size 11}
       (str "Date:\nN" \u00b0 " de facture:" )]]
-    [:cell {:align :right} (str (date-short (tm/today)) "\n" (int (:_id booking)))]]
+    [:cell {:align :right} (str date-string "\n" (int (:_id booking)))]]
    [[:cell {:colspan 6} [:chunk "Facturé à:"]]]
    [[:cell {:colspan 6}
     [:chunk (str (booking :guestName)
@@ -271,34 +268,30 @@
              (conj row-tva-info))))))
 
 (defn invoice-footer [product-count]
-  (let [footer (list [:chunk {:size 10 :align :center} footer-text])
+  (let [footer (list [:chunk {:size 10 :align :center} settings/footer-text])
         lines 13
         lines-available (- lines product-count)]
     (if (not (neg? lines-available))
       (into footer (repeat lines-available [:chunk "\n"])))))
 
-(def footer-text (str "Pour tout règlement par tranfert bancaire:"
-                      "\nNom: Jeane Vrielink"
-                      "\nBanque: Société Générale Cluny, 17 Rue Filaterie, 71250"
-                      "\nRIB: 30003 01212 00050133751 65"
-                      "\nIBAN: FR76 3000 3012 1200 0501 3375 165"
-                      "\nBIC-ADRESSE SWIFT: SOGEFRPP"))
-
-(defn create-invoice [booking percentage]
-  (let [p (filter #(not (:invoice %)) (sort cmprtr (:products booking)))]
-    (pdf/pdf [{:title "Facture"
-               :author "Château de Burnand"
-               :size :a4
-               :footer false
-               :font {:family :times-roman :size 11}}
-              (invoice-header booking false)
-              (invoice-body p percentage false)
-              (invoice-footer (+ 
-                            (if (= percentage 100)
-                              0
-                              1)
-                            (count p)))]
-             (str "resources/public/pdf/facture" (int (:_id booking)) ".pdf"))))
+(defn create-invoice
+  ([booking] (create-invoice booking 100 date-string-today))
+  ([booking percentage] (create-invoice percentage date-string-today))
+  ([booking percentage date-string]
+    (let [p (filter #(not (:invoice %)) (sort cmprtr (:products booking)))]
+      (pdf/pdf [{:title "Facture"
+                 :author "Château de Burnand"
+                 :size :a4
+                 :footer false
+                 :font {:family :times-roman :size 11}}
+                (invoice-header booking date-string false)
+                (invoice-body p percentage false)
+                (invoice-footer (+ 
+                                  (if (= percentage 100)
+                                    0
+                                    1)
+                                  (count p)))]
+               (str "resources/public/pdf/facture" (int (:_id booking)) ".pdf")))))
 
 (defn ring-pdf []
   {:status 200
