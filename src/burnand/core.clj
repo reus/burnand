@@ -280,7 +280,7 @@
   ([booking percentage date-string]
     (let [p (filter #(not (:invoice %)) (sort cmprtr (:products booking)))]
       (pdf/pdf [{:title "Facture"
-                 :author "Château de Burnand"
+                 :author burnand.settings/pdf-author
                  :size :a4
                  :footer false
                  :font {:family :times-roman :size 11}}
