@@ -16,10 +16,12 @@
             [clj-pdf.core :as pdf]
             [burnand.settings :as settings]
             [ring.util.response :as resp])
-  (:import (java.io FileInputStream)))
+  (:import (java.io FileInputStream)
+           org.bson.types.ObjectId))
 
 (def date-format (tmf/formatter "d MMMM yyyy"))
 (def date-format-short (tmf/formatter "dd-MM-yyyy"))
+(def date-format-js (tmf/formatter "dd/MM/yyyy"))
 
 (def date-string-today (tmf/unparse date-format-short (tm/now)))
 
@@ -28,7 +30,8 @@
                   (tm/time-zone-for-id "Europe/Paris"))
                 date))
 
-(def local-mongo "mongodb://burnand:burnand@localhost/burnand")
+(defn day-range [date1 date2]
+  (take-while #(neg? (compare % date2)) (map #(clj-time.core/plus date1 (clj-time.core/days %)) (range))))
 
 (defn currency [double]
   (format "€ %.2f" double))
@@ -37,12 +40,14 @@
   (println "Connecting to database...")
   (mg/connect-via-uri! location))
 
-(defn add-booking
-  [name date]
-  (mc/insert "bookings" {:name name :check_in_date date}))
-
 (defn query-rooms []
   (mc/find-maps "rooms"))
+
+(defn rate [room]
+    (get (get-room room) :rate))
+
+(defn get-room [room]
+  (mc/find-one-as-map "rooms" {:_id room}))
 
 (defn query-bookings []
   (let [now (tm/now)
@@ -125,11 +130,45 @@
 (html/deftemplate rooms "public/rooms.html" []
   [:#room] (html/content (html/html [:option.room])))
 
-(defn increment-invoice-nr []
-  (mc/update "counters" {:_id "invoiceNr"} {mo/$inc {:seq 1}}))
+(defn increment-booking-id []
+  (let [new-id (get (mc/find-and-modify "counters" {:_id "bookingId"} {mo/$inc {:seq 1}}) :seq 0)]
+      (int new-id)))
+
+(defn db-update-product [booking-id product-id new-product]
+    (let [result (monger.collection/update "bookings"
+                                           {:_id booking-id :products._id (org.bson.types.ObjectId. product-id)}
+                                           {monger.operators/$set {:products.$ new-product}})]
+        result))
 
 (defn db-save-booking [params]
-  (println params))
+  (let [{check-in-date :check_in_date
+         check-in-month :check_in_month
+         check-out-date :check_out_date
+         check-out-month :check_out_month
+         guest-name :guest_name
+         rooms :rooms
+         booking-type :booking_type} params
+        check-in (str check-in-date "/" check-in-month)
+        ci (tmf/parse date-format-js check-in)
+        check-out (str check-out-date "/" check-out-month)
+        co (tmf/parse date-format-js check-out)
+        rooms (filter #(> (read-string (val %)) 0) (:rooms params))
+        products (for [date (day-range ci co)
+                       [room nr] rooms]
+                   {:_id (ObjectId.)
+                    :date date
+                    :type :room
+                    :room room
+                    :persons (int (read-string nr))
+                    :quantity (int 1)
+                    :price (rate room)})]
+    (mc/insert "bookings"
+               {:_id (increment-booking-id)
+                :guestName guest-name
+                :checkInDate ci
+                :checkOutDate co
+                :bookingType booking-type
+                :products products})))
 
 (defn ring-save-booking [params]
   (db-save-booking params)
@@ -138,12 +177,12 @@
  (defn total-price [products]
     (reduce #(+ % (* (:quantity %2) (:price %2))) 0 products))
 
-(defn id-to-room-name [id]
-  (let [m (apply merge (map (fn [col] {(:_id col) (:name col)}) (query-rooms)))]
+(defn keyword-to-room-name [id]
+  (let [m (apply merge (map (fn [col] {(keyword (:_id col)) (:name col)}) (query-rooms)))]
     (m id)))
 
 (defn rooms-per-booking [{products :products}]
-  (apply str (interpose ", " (map id-to-room-name (distinct (map #(:room %) (filter #(= (:type %) "room") products)))))))
+  (apply str (interpose ", " (map keyword-to-room-name (distinct (map #(keyword (:room %)) (filter #(= (:type %) "room") products)))))))
 
 (html/deftemplate ring-bookings-overview "public/index.html" []
   [:#tbl_bookings :tr.value] (html/clone-for [{id :_id nm :guestName check-in-date :checkInDate nights :nights :as booking}
@@ -162,9 +201,12 @@
   [:.city :.value] (html/content (booking :city))
   [:.country :.value] (html/content (booking :country))
   [:.row.night.value] (html/clone-for [night (filter #(= (:type %) "room") (booking :products))]
-                [:.row.night] (html/add-class (night :room))
-                [:.date] (html/content (date-short (night :date)))
-                [:.room :span] (html/content (id-to-room-name (night :room)))
+                [:.row.night] (html/do->
+                                  (html/add-class (night :room))
+                                  (html/set-attr :id (str (night :_id))))
+                [:.date :span] (html/content (date-short (night :date)))
+                [:.date :input] (html/set-attr :value (date-short (night :date)))
+                [:.room :span] (html/content (keyword-to-room-name (keyword (night :room))))
                 [:.room :select :option] (html/clone-for [{id :_id room-name :name}
                                                           (sort #(compare (:order %1) (:order %2)) (query-rooms))]
                                                           (html/do->
@@ -172,8 +214,10 @@
                                                             (if (= id (night :room))
                                                               (html/set-attr :selected "selected")
                                                               (html/add-class "not-selected"))))
-                [:.type] (html/content (str (int (night :persons)) " persons" ))
-                [:.price] (html/content (currency (night :price))))
+                [:.nr-of-persons :span] (html/content (str (int (night :persons))))
+                [:.nr-of-persons :input] (html/set-attr :value (str (int (night :persons))))
+                [:.price :span] (html/content (currency (night :price)))
+                [:.price :input] (html/set-attr :value (str (night :price))))
   [:.total :.price] (html/content (currency (total-price (:products booking)))))
 
 (defn assoc-in-last [m [& ks] v]
@@ -197,12 +241,12 @@
    ["" "" "" "" "" ""]
    [
     [:cell {:colspan 2 :rowspan 2} [:image {:width 123 :height 107}
-                                    "resources/public/images/logo_burnand_bw.jpg"]]
+                                    settings/logo]]
     [:cell {:colspan 2 :align :center}
      [:chunk settings/address]]
     [:cell {:colspan 2 :align :right}
      [:chunk {:size 38 :color [77 77 77]} "\nFacture"]]]
-   [[:cell {:colspan 2 :align :center} [:chunk settings/siret]]
+   [[:cell {:colspan 2 :align :center} [:chunk settings/company]]
     [:cell {:align :right}
      [:chunk {:size 11}
       (str "Date:\nN" \u00b0 " de facture:" )]]
@@ -233,7 +277,7 @@
         f #(-> %
                (assoc-in-last [0 1] [:chunk (str (date-short (:date %2)) "\n")])
                (assoc-in-last [1 1] [:chunk (str (format "%14d" 1) "\n")])
-               (assoc-in-last [2 2] [:chunk (str (id-to-room-name (:room %2))
+               (assoc-in-last [2 2] [:chunk (str (keyword-to-room-name (keyword (:room %2)))
                                                  (if (= (:persons %2) 1)
                                                    (" (1 personne)\n")
                                                    (str " (" (int (:persons %2)) " personnes)\n")))])
@@ -276,11 +320,11 @@
 
 (defn create-invoice
   ([booking] (create-invoice booking 100 date-string-today))
-  ([booking percentage] (create-invoice percentage date-string-today))
+  ([booking percentage] (create-invoice booking percentage date-string-today))
   ([booking percentage date-string]
     (let [p (filter #(not (:invoice %)) (sort cmprtr (:products booking)))]
       (pdf/pdf [{:title "Facture"
-                 :author burnand.settings/pdf-author
+                 :author settings/pdf-author
                  :size :a4
                  :footer false
                  :font {:family :times-roman :size 11}}
@@ -316,6 +360,6 @@
 (def application (handler/site routes))
 
 (defn run []
-  (mongo-connect local-mongo)
+  (mongo-connect settings/mongo-uri)
   (run-server application {:port 8090 :join? false}))
 
