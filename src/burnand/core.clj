@@ -15,6 +15,7 @@
             [monger.query :as mq]
             [monger.operators :as mo]
             [clojure.data.json :as json]
+            [clojure.java.io :as io]
             [clj-pdf.core :as pdf]
             [burnand.settings :as settings]
             [ring.util.response :as resp])
@@ -22,7 +23,9 @@
            org.bson.types.ObjectId))
 
 (def date-format (tmf/formatter "d MMMM yyyy"))
+
 (def date-format-short (tmf/formatter "dd-MM-yyyy"))
+
 (def date-format-js (tmf/formatter "dd/MM/yyyy"))
 
 (def date-string-today (tmf/unparse date-format-short (tm/now)))
@@ -31,6 +34,8 @@
    (tmf/unparse (tmf/with-zone date-format-short
                   (tm/time-zone-for-id "Europe/Paris"))
                 date))
+
+(def product-order {:room 0 :sup-bed 1 :consumption 2})
 
 (defn day-range [date1 date2]
   (take-while #(neg? (compare % date2)) (map #(clj-time.core/plus date1 (clj-time.core/days %)) (range))))
@@ -51,14 +56,19 @@
 (defn rate [room]
     (get (get-room room) :rate))
 
+(defn keyword-to-room-name [id]
+  (let [m (apply merge (map (fn [col] {(keyword (:_id col)) (:name col)}) (query-rooms)))]
+    (m id)))
+
 (defn query-bookings []
   (let [now (tm/now)
-        yesterday (tm/minus now (tm/days 2))
+        last-week (tm/minus now (tm/days 8))
         next-weeks (tm/plus now (tm/days 28))]
     (mq/with-collection "bookings"
-      (mq/find {:checkInDate {mo/$gte yesterday mo/$lt next-weeks}})
+      ;(mq/find {:checkInDate {mo/$gte last-week mo/$lt next-weeks}})
+      (mq/find {})
       (mq/fields [:_id :guestName :checkInDate :products])
-      (mq/sort (array-map :checkInDate 1)))))
+      (mq/sort (array-map :checkInDate -1)))))
       ;(mq/limit 10))))
 
 (defn send-bookings-json []
@@ -74,25 +84,26 @@
 (defn query-setting [key]
   (get (mc/find-by-id "settings" key) "value"))
 
-(defn get-tax-info [{products :products}]
-  (let [nights (filter (comp #{"room"} :type) products)
-        taxable (reduce #(+ % (:taxed %2)) 0.0 nights)
-        tourist-tax (query-setting "touristTax")
-        total (* taxable tourist-tax)]
-    {:tourist-tax tourist-tax
-     :taxable taxable
-     :total total}))
+(defn query-consumptions [o]
+  (mq/with-collection "consumptions"
+    (mq/fields [:description :price])
+    (mq/sort (array-map :description o))))
 
+(defn get-taxable [booking]
+  (let [products (:products booking)
+        nights (filter (comp #{"room"} :type) products)
+        taxable (reduce #(+ % (:taxed %2)) 0 nights)]
+     taxable))
 
 (defn month-list []
   (let [now (tm/now)
         custom-formatter (tmf/formatter "MMMM yyyy")]
-    (map #(tmf/unparse custom-formatter (tm/plus now (tm/months %))) (range 12))))
+    (map #(tmf/unparse custom-formatter (tm/plus now (tm/months %))) (range -1 12))))
 
 (defn month-list-numeric []
   (let [now (tm/now)
         custom-formatter (tmf/formatter "MM/yyyy")]
-    (map #(tmf/unparse custom-formatter (tm/plus now (tm/months %))) (range 12))))
+    (map #(tmf/unparse custom-formatter (tm/plus now (tm/months %))) (range -1 12))))
 
 (html/deftemplate new-booking "public/new_booking.html" []
   [:#booking_type :option] (html/do-> 
@@ -127,13 +138,11 @@
                                                                       (if (= i 1) " person"
                                                                                   " persons")))
                                                                (html/set-attr :value (str i))))))))
-  [:#check_in_month] (html/content (html/html [:option]))
   [:#check_in_month :option] (html/clone-for [[m n] (map vector (concat (month-list) '("Later"))
                                                        (concat (month-list-numeric) '("Later")))]
                                         [:option] (html/content (str m))
                                         [:option] (html/set-attr :value (str n)))
 
-  [:#check_out_month] (html/content (html/html [:option]))
   [:#check_out_month :option] (html/clone-for [[m n] (map vector (concat (month-list) '("Later"))
                                                        (concat (month-list-numeric) '("Later")))]
                                         [:option] (html/content (str m))
@@ -151,7 +160,6 @@
                                            {:_id booking-id :products._id (org.bson.types.ObjectId. product-id)}
                                            {monger.operators/$set {:products.$ new-product}})]
         result))
-
 
 (defn db-add-invoice [booking-id invoice]
   nil)
@@ -175,10 +183,12 @@
                     :date date
                     :type :room
                     :room room
+                    :description (keyword-to-room-name (keyword room))
                     :persons (int (read-string nr))
                     :taxed (int 0)
                     :quantity (int 1)
-                    :price (rate room)})]
+                    :price (rate room)
+                    :total (rate room)})]
     (mc/insert "bookings"
                {:_id (increment-booking-id)
                 :guestName guest-name
@@ -186,14 +196,45 @@
                 :checkOutDate co
                 :bookingType booking-type
                 :products products
-                :invoices []})))
+                :invoices []
+                :payments []
+                :tax-rate (query-setting "touristTax")})))
 
 (defn ring-save-booking [params]
   (db-save-booking params)
   (resp/redirect "/"))
 
- (defn total-price [products]
-    (reduce #(+ % (* (:quantity %2) (:price %2))) 0 products))
+(defn nights-subtotal [{products :products :as booking}]
+  (let [nights (filter (comp #{"room" "sup-bed"} :type) products)
+        total (reduce #(+ % (* (:quantity %2) (:price %2))) 0 nights)]
+    total))
+
+(defn tax-total [booking]
+  (let [tax-rate (:tax-rate booking)
+        taxable (get-taxable booking)
+        total (* tax-rate taxable)]
+    total))
+
+(defn nights-total [{products :products :as booking}]
+  (let [subtotal (nights-subtotal booking)
+        tx (tax-total booking)
+        total (+ subtotal tx)]
+    total))
+
+(defn consumptions-total [{products :products}]
+  (let [consumptions (filter (comp #{"consumption"} :type) products)
+        total (reduce #(+ % (* (:quantity %2) (:price %2))) 0 consumptions)]
+    total))
+
+(defn payments-total [{payments :payments}]
+  (reduce #(+ (:amount %2) %)  0.0 payments))
+
+(defn products-total [{products :products :as booking}]
+  (let [total (reduce #(+ % (* (:quantity %2) (:price %2))) 0.0 products)]
+    total))
+
+(defn total-price [booking]
+  (- (+ (products-total booking) (tax-total booking)) (payments-total booking)))
 
 (defn keyword-to-room-name [id]
   (let [m (apply merge (map (fn [col] {(keyword (:_id col)) (:name col)}) (query-rooms)))]
@@ -210,7 +251,7 @@
                                       [:.check-in-date] (html/content (tmf/unparse date-format check-in-date))
                                       [:.rooms] (html/content (rooms-per-booking booking))))
 
-(html/deftemplate ring-booking-details "public/booking.html" [booking tax-info]
+(html/deftemplate ring-booking-details "public/booking.html" [booking]
   [:#name] (html/content (booking :guestName))
   [:#booking_id] (html/content (str (int (booking :_id))))
   [:.guestName :.value :span] (html/content (booking :guestName))
@@ -239,9 +280,7 @@
                                     (html/set-attr :class "row value bed")))
                 [:.date :span] (html/content (date-short (night :date)))
                 [:.date :input] (html/set-attr :value (date-short (night :date)))
-                [:.room :span] (if (= (:type night) "room")
-                                 (html/content (keyword-to-room-name (keyword (night :room))))
-                                 (html/content (:description night)))
+                [:.room :span] (html/content (:description night))
                 [:.room :select :option] (when
                                            (= (:type night) "room") (html/clone-for [{id :_id room-name :name}
                                                                                      (sort #(compare (:order %1) (:order %2)) (query-rooms))]
@@ -260,11 +299,32 @@
                 [:.tax :input] (when (= (:type night) "room") (html/set-attr :value (str (int (night :taxed)))))
                 [:.price :span] (html/content (format "%.2f" (float (night :price))))
                 [:.price :input] (html/set-attr :value (format "%.2f" (float (night :price)))))
-  [:.subtotal :.price :span] (html/content (format "%.2f" (float (total-price (:products booking)))))
-  [:#taxable] (html/content (str (int (:taxable tax-info))))
-  [:#tax_amount] (html/content (format "%.2f" (:tourist-tax tax-info)))
-  [:.taxtotal :.price :span] (html/content (format "%.2f" (:total tax-info)))
-  [:.total :.price :span] (html/content (format "%.2f" (+ (float (total-price (:products booking))) (:total tax-info)))))
+  [:.subtotal :.price :span] (html/content (format "%.2f" (float (nights-subtotal booking))))
+  [:#taxable] (html/content (str (get-taxable booking)))
+  [:#tax_amount] (html/content (format "%.2f" (:tax-rate booking)))
+  [:.night.taxtotal :.price :span.val] (html/content (format "%.2f" (tax-total booking)))
+  [:.night.total :.price :span] (html/content (format "%.2f" (nights-total booking)))
+  [:.row.new.consumption :.description :option] (html/clone-for
+                                                  [consumption
+                                                   (conj (reduce #(conj % %2) '({:description "Other:" :price "-1"}) (query-consumptions -1))
+                                                         {:description "Choose a product" :price ""})]
+                                [:option] (html/do->
+                                            (html/content (:description consumption))
+                                            (html/set-attr :value (:price consumption))))
+  [:.row.value.consumption] (html/clone-for [consumption (let [consumptions (filter (comp #{"consumption"} :type) (booking :products))
+                                                               sorted-consumptions (sort-by #(vec (map % [:date])) consumptions)]
+                                                           sorted-consumptions)]
+                                [:.row.value.consumption] (html/set-attr :id (str (:_id consumption)))
+                                [:.date :span] (html/content (date-short (:date consumption)))
+                                [:.date :input] (html/set-attr :value (date-short (:date consumption)))
+                                [:.description :span] (html/content (:description consumption))
+                                [:.description :input] (html/set-attr :value (:description consumption))
+                                [:.quantity :span] (html/content (str (int (:quantity consumption))))
+                                [:.quantity :input] (html/set-attr :value (str (int (:quantity consumption))))
+                                [:.each :span] (html/content (format "%.2f" (float (:price consumption))))
+                                [:.each :input] (html/set-attr :value (format "%.2f" (float (:price consumption))))
+                                [:.price :span] (html/content (format "%.2f" (float (:total consumption)))))
+  [:.row.total.consumption :.price :span] (html/content (format "%.2f" (float (consumptions-total booking)))))
 
 (defn assoc-in-last [m [& ks] v]
   (let [es (reduce #(get %1 %2) m ks)]
@@ -282,183 +342,93 @@
                               (let [type-order {"room" 1 "dinner" 2 "product" 3}]
                                 (< (type-order (:type x)) (type-order (:type y)))))))))
 
-(defn invoice-header [booking date-string show-borders]
-  [:table {:border show-borders :cell-border show-borders}
-   ["" "" "" "" "" ""]
-   [
-    [:cell {:colspan 2 :rowspan 2} [:image {:width 123 :height 107}
-                                    settings/logo]]
-    [:cell {:colspan 2 :align :center}
-     [:chunk settings/address]]
-    [:cell {:colspan 2 :align :right}
-     [:chunk {:size 38 :color [77 77 77]} "\nFacture"]]]
-   [[:cell {:colspan 2 :align :center} [:chunk settings/company]]
-    [:cell {:align :right}
-     [:chunk {:size 11}
-      (str "Date:\nN" \u00b0 " de facture:" )]]
-    [:cell {:align :right} (str date-string "\n" (int (:_id booking)))]]
-   [[:cell {:colspan 6} [:chunk "Facturé à:"]]]
-   [[:cell {:colspan 6}
-    [:chunk (str (booking :guestName)
-                 "\n" (booking :address1)
-                 "\n" (booking :address2)
-                 "\n" (booking :address3)
-                 "\n" (booking :address4))]]]])
-
-(defn invoice-body [products percentage paid show-borders]
-  (let [header [[:cell [:paragraph
-                        [:chunk "Date"]]]
-                [:cell {:align :center} [:paragraph
-                        [:chunk "Quantités"] ]]
-                [:cell [:paragraph [:chunk "Description"]]]
-                ""
-                [:cell {:align :center} [:paragraph {:indent 0} [:chunk "Prix à l'unité"]]]
-                [:cell {:align :center} [:paragraph {:indent 12} [:chunk "Prix total"]]]]
-        cols [[:cell [:paragraph]]
-              [:cell [:paragraph]]
-              [:cell {:colspan 2} [:paragraph]]
-              [:cell [:paragraph]]
-              [:cell [:paragraph]]]
-        rooms (filter #(= (:type %) "room") products)
-        f #(-> %
-               (assoc-in-last [0 1] [:chunk (str (date-short (:date %2)) "\n")])
-               (assoc-in-last [1 1] [:chunk (str (format "%14d" 1) "\n")])
-               (assoc-in-last [2 2] [:chunk {:size 9} (str (keyword-to-room-name (keyword (:room %2)))
-                                                 (if (= (:persons %2) 1)
-                                                   (" (1 personne)\n")
-                                                   (str " (" (int (:persons %2)) " personnes)\n")))])
-               (assoc-in-last [3 1] [:chunk {:family :courier}
-                                     (str (format "%11s" (currency (:price %2))) "\n")])
-               (assoc-in-last [4 1] [:chunk {:family :courier}
-                                     (str (format "%11s" (currency (:price %2))) "\n")]))
-        product-rows (reduce f cols rooms)
-        total (total-price products)
-        row-product-totals [[:cell {:colspan 5} [:chunk "Montant total:"]]
-                        [:cell [:chunk {:family :courier} (format "%11s" (currency total))]]]
-        row-product-pay [[:cell {:colspan 5} [:chunk {:style :bold} "À PAYER"]]
-                         [:cell [:chunk {:family :courier :style :bold}
-                               (format "%11s" (currency (* (/ percentage 100) total)))]]]
-        row-tva-info [[:cell {:colspan 6} [:paragraph "TVA non applicable, article 293 B du CGI."]]]
-        row-downpayment (when (< percentage 100)
-                          [[:cell
-                            {:colspan 5} [:chunk (str "Acompte " percentage "% de " (currency total))]]
-                           [:cell [:chunk {:family :courier} (format "%11s" (currency (* (/ percentage 100) total)))]]])
-        row-paid (when paid
-                   [[:cell
-                     {:colspan 5} [:chunk (str "Payé " (get paid :date) " " (get paid :method))]]])
-        table [:table
-               {:border show-borders 
-                :cell-border show-borders}
-               header product-rows row-product-totals row-downpayment row-product-pay row-tva-info row-paid]]
-    (filter #(not (nil? %)) table)))
-
-(defn invoice-footer [lines-available]
-  (let [footer (list [:chunk {:size 10 :align :center} settings/footer-text])
-        ]
-    (if (not (neg? lines-available))
-      (into footer (repeat lines-available [:chunk "\n"])))))
-
-(defn create-invoice
-  ([booking] (create-invoice booking false 100 date-string-today))
-  ([booking paid] (create-invoice booking paid 100 date-string-today))
-  ([booking paid percentage] (create-invoice booking paid percentage date-string-today))
-  ([booking paid percentage date-string]
-    (let [products (filter #(not (:invoice %)) (sort cmprtr (:products booking)))
-          p (count products)
-          p (if (< percentage 100) (inc p) p)
-          p (if paid (inc (inc p)) p)
-          lines 13
-          lines-available (- lines p)
-          filename (str "resources/public/pdf/facture" (int (:_id booking)) ".pdf")]
-      (pdf/pdf [{:title "Facture"
-                 :author settings/pdf-author
-                 :size :a4
-                 :footer false
-                 :font {:family :helvetica :size 10}}
-                (invoice-header booking date-string false)
-                (invoice-body products percentage paid false)
-                (invoice-footer lines-available)]
-               filename)
-      filename)))
-
-(defn ring-pdf []
-  {:status 200
-   :headers {"Content-Type" "application/pdf"}
-   :body (FileInputStream. "example.pdf")})
-
 (defn get-booking [id]
   (mc/find-one-as-map "bookings" {:_id id}))
 
-
-(defn remove-nights [booking-id product-ids]
+(defn remove-products [booking-id product-ids]
   (mc/update "bookings" {:_id booking-id}
              {mo/$pull {:products {:_id {mo/$in product-ids}}}})
   true)
 
-(defn edit-nights [booking-id nights]
-  (doseq [night nights]
-    (case (:type night)
+(defn edit-products [booking-id products]
+  (doseq [product products]
+    (case (:type product)
       "room" (mc/update "bookings" {:_id booking-id
-                           :products._id (org.bson.types.ObjectId. (:_id night))}
-               {mo/$set {:products.$.date (tmf/parse date-format-short (:date night))
-                         :products.$.room (:room night)
-                         :products.$.persons (read-string (:persons night))
-                         :products.$.taxed (read-string (:taxed night))
-                         :products.$.price (float (read-string (:price night)))}})
+                           :products._id (org.bson.types.ObjectId. (:_id product))}
+               {mo/$set {:products.$.date (tmf/parse date-format-short (:date product))
+                         :products.$.room (:room product)
+                         :products.$.description (keyword-to-room-name (keyword (:room product)))
+                         :products.$.persons (read-string (:persons product))
+                         :products.$.taxed (read-string (:taxed product))
+                         :products.$.quantity (int 1)
+                         :products.$.price (float (read-string (:price product)))
+                         :products.$.total (float (read-string (:price product)))}})
       "sup-bed" (mc/update "bookings" {:_id booking-id
-                                       :products._id (org.bson.types.ObjectId. (:_id night))}
-                           {mo/$set {:products.$.date (tmf/parse date-format-short (:date night))
-                                     :products.$.description (:description night)
-                                     :products.$.price (float (read-string (:price night)))}})
+                                       :products._id (org.bson.types.ObjectId. (:_id product))}
+                           {mo/$set {:products.$.date (tmf/parse date-format-short (:date product))
+                                     :products.$.description (:description product)
+                                     :products.$.quantity (int 1)
+                                     :products.$.price (float (read-string (:price product)))
+                                     :products.$.total (float (read-string (:price product)))}})
+      "consumption" (mc/update "bookings" {:_id booking-id
+                                           :products._id (org.bson.types.ObjectId. (:_id product))}
+                              {mo/$set {:products.$.date (tmf/parse date-format-short (:date product))
+                                        :products.$.description (:description product)
+                                        :products.$.quantity (int (read-string (:quantity product)))
+                                        :products.$.price (float (read-string (:price product)))
+                                        :products.$.total (float (*
+                                                           (read-string (:quantity product))
+                                                           (read-string (:price product))))}}) 
       :default))
   true)
 
-(defn add-nights [booking-id nights]
-  (doseq [night nights]
-    (case (:type night)
-      "room" (let [n (assoc night
-                   :_id (org.bson.types.ObjectId.)
-                   :quantity (int 1)
-                   :type "room"
-                   :date (tmf/parse date-format-short (:date night))
-                   :persons (int (read-string (:persons night)))
-                   :taxed (int (read-string (:taxed night)))
-                   :price (float (read-string (:price night))))]
-               (mc/update "bookings"
-                          {:_id booking-id}
-                          {mo/$push { :products n }}))
-      "sup-bed" (let [n (assoc night
-                   :_id (org.bson.types.ObjectId.)
-                   :quantity (int 1)
-                   :type "sup-bed"
-                   :description (:description night)
-                   :date (tmf/parse date-format-short (:date night))
-                   :price (float (read-string (:price night))))]
-      (mc/update "bookings"
-               {:_id booking-id}
-               {mo/$push { :products n }}))))
+(defn add-products [booking-id products]
+  (doseq [product products]
+    (let [n (case (:type product)
+              "room" (assoc product
+                            :_id (org.bson.types.ObjectId.)
+                            :description (keyword-to-room-name (keyword (:room product)))
+                            :quantity (int 1)
+                            :date (tmf/parse date-format-short (:date product))
+                            :persons (int (read-string (:persons product)))
+                            :taxed (int (read-string (:taxed product)))
+                            :price (float (read-string (:price product)))
+                            :total (float (read-string (:price product))))
+              "sup-bed" (assoc product
+                               :_id (org.bson.types.ObjectId.)
+                               :quantity (int 1)
+                               :date (tmf/parse date-format-short (:date product))
+                               :price (float (read-string (:price product)))
+                               :total (float (read-string (:price product))))
+              "consumption" (assoc product
+                                   :_id (org.bson.types.ObjectId.)
+                                   :quantity (int (read-string (:quantity product)))
+                                   :date (tmf/parse date-format-short (:date product))
+                                   :price (float (read-string (:price product)))
+                                   :total (* (read-string (:price product))
+                                             (read-string (:quantity product))))
+              nil)]
+      (when n
+        (mc/update "bookings"
+                   {:_id booking-id}
+                   {mo/$push { :products n }}))))
   true)
 
-(defn get-nights [booking-id]
+(defn get-products [booking-id]
   (let [products (:products (mc/find-one-as-map "bookings" {:_id booking-id} [:products]))
-        nights (filter (comp #{"room" "sup-bed"} :type) products)
-        sorted-nights (sort-by #(vec (map % [:date :type])) nights)]
-    sorted-nights))
+        ;nights (filter (comp #{"room" "sup-bed"} :type) products)
+        sorted-products (sort-by #(vec (map % [:date :type])) products)]
+    sorted-products))
 
-(defn get-nights-formatted [booking-id]
-  (let [nights (get-nights booking-id)]
+(defn get-products-formatted [booking-id]
+  (let [products (get-products booking-id)]
     (map #(assoc %
                  :_id (.toString (:_id %))
                  :date (date-short (:date %))
-                 :room_full (keyword-to-room-name (keyword (:room %)))
-                 :price (format "%.2f" (float (:price %)))) nights)))
+                 :price (format "%.2f" (float (:price %)))
+                 :total (format "%.2f" (float (:total %)))) products)))
 
-
-(defn my-value-reader [key value]
-  (if (= key :iremove)
-    (str value)))
-
-(defn ring-save-nights [params]
+(defn ring-save-products [params]
   (let [data (json/read-str (:data params) :key-fn keyword)
         {booking-id :booking_id} data
         b-id (read-string booking-id)
@@ -467,22 +437,22 @@
         {e :edit} data
         {a :add} data
         body (and
-               (remove-nights b-id _r)
-               (edit-nights b-id e)
-               (add-nights b-id a)
-               (json/write-str (get-nights-formatted b-id)))]
+               (remove-products b-id _r)
+               (edit-products b-id e)
+               (add-products b-id a)
+               (json/write-str (get-products-formatted b-id)))]
     {:status 200
      :body body
      :headers {"Content-Type" "application/json"}}))
 
-(defn get-personal [booking-id]
+(defn get-general [booking-id]
   (mc/find-one-as-map "bookings" {:_id booking-id} [:guestName
                                                     :address1
                                                     :address2
                                                     :address3
                                                     :address4]))
 
-(defn ring-save-personal [{data :data}]
+(defn ring-save-general [{data :data}]
   (let [d (json/read-str data :key-fn keyword)
         id (read-string (:bookingId d))
         name (:name d)
@@ -497,12 +467,57 @@
                           :address3 address3
                           :address4 address4}})
     {:status 200
-     :body (json/write-str (get-personal id))
+     :body (json/write-str (get-general id))
      :headers {"Content-Type" "application/json"}}))
 
-(html/deftemplate ring-invoice "public/invoice.html" [])
+(defn get-product-description [p]
+  (case (:type p)
+    "room" (keyword-to-room-name (keyword (:room p)))
+    (:description p)))
+                         
+(html/deftemplate ring-invoice "public/invoice.html" [booking invoice-nr date percentage paid]
+  [:#invoice-info :.page] (html/content "1/1")
+  [:#invoice-info :.date] (html/content date)
+  [:#invoice-info :.invoice-nr] (html/content invoice-nr)
+  [:#name] (html/content (:guestName booking))
+  [:#address1] (html/content (:address1 booking))
+  [:#address2] (html/content (:address2 booking))
+  [:#address3] (html/content (:address3 booking))
+  [:#address4] (html/content (:address4 booking))
+  [:.row.value] (html/clone-for [product (let [products (:products booking)
+                                               sorted-products (sort-by #(vec (map % [:date (product-order %)])) products)]
+                                           sorted-products)]
+                                [:.date] (html/content (date-short (:date product)))
+                                [:.description] (html/content (get-product-description product))
+                                [:.quantity] (html/content (str (:quantity product)))
+                                [:.unit] (html/content (format "%.2f" (float (:price product))))
+                                [:.price] (html/content (format "%.2f" (float (* (:quantity product)(:price product))))))
+  [:.subtotal :.currency] (html/content (format "%.2f" (float (products-total booking))))
+  [:.row.tax] (when (not (zero? (get-taxable booking))) (html/set-attr :class "row tax"))
+  [:.row.tax :.taxable] (html/content (str (get-taxable booking)))
+  [:.row.tax :.tax-rate] (html/content (format "%.2f" (:tax-rate booking)))
+  [:.row.tax :.cell.price] (html/content (format "%.2f" (tax-total booking)))
+  [:.row.acompte] (when (< percentage 100) (html/set-attr :class "row acompte"))
+  [:.row.paid] (html/clone-for [payment (:payments booking)])
+  [:.row.amount :.cell.price] (html/content (format "%.2f" (total-price booking)))
+  [:#contact] (html/html-content settings/contact)
+  [:#paye] (if paid (html/set-attr :id "paye"))
+  [:#bank_info] (html/html-content settings/bank-info))
 
-(html/deftemplate ring-add-invoice "public/invoice.html" [])
+(defn ring-add-invoice
+  ([booking] (ring-add-invoice booking date-string-today 100 false))
+  ([booking date] (ring-add-invoice booking date 100 false))
+  ([booking date percentage] (ring-add-invoice booking date percentage false))
+  ([booking date percentage paid]
+   (let [invoices (:invoices booking)
+         invoice-count (inc (count invoices))
+         invoice-nr (str (:_id booking) (format "%02d" invoice-count))]
+     (spit (str "resources/public/invoices/" invoice-nr) (apply str (ring-invoice booking invoice-nr date percentage paid))))))
+
+(defn ring-pdf []
+  {:status 200
+   :headers {"Content-Type" "application/pdf"}
+   :body (FileInputStream. "example.pdf")})
 
 (defroutes routes
   ;(GET "/" [] (resp/file-response "index.html" {:root "resources/public"})) 
@@ -512,14 +527,22 @@
   (GET "/booking/:id" [id] (let [bid (read-string id)
                                  booking (get-booking bid)]
                              (if booking
-                               (ring-booking-details booking (get-tax-info booking))
+                               (ring-booking-details booking)
                                {:body (str "Could not find booking with id " id)})))
   (GET "/pdf" [] (ring-pdf))
   (GET "/add-invoice" [] (ring-add-invoice))
-  (GET "/invoice/:id" [id] (ring-invoice id))
+  (GET "/_invoice/:id" [id] (let [bid (read-string id)
+                                  booking (get-booking bid)]
+                              (if booking
+                                (ring-invoice booking)
+                                {:body (str "Could not find booking with id " id)})))
+  (GET "/invoice/:id" [id] (do
+                             {:status 200
+                              :headers {"charset" "UTF-8" "Content-type" "text/html"}
+                              :body (io/file (str "resources/public/invoices/" id))}))
   (GET "/rooms" [] (rooms))
-  (POST "/save-nights" {params :params} (ring-save-nights params))
-  (POST "/save-personal" {params :params} (ring-save-personal params))
+  (POST "/save-products" {params :params} (ring-save-products params))
+  (POST "/save-general" {params :params} (ring-save-general params))
   (POST "/new" {params :params} (ring-save-booking params))
   (route/resources "/")
   (route/not-found "<p>Sorry, there's nothing here.</p>"))
