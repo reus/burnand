@@ -1,6 +1,6 @@
 # burnand
 
-A Clojure web-app designed to make the life of a b&b keeper a bit easier.
+A tool for Bed & Breakfast bookkeeping.
 
 ## Usage
 
