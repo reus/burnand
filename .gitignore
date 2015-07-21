@@ -15,4 +15,3 @@ pom.xml.asc
 /.nrepl-port
 /.env
 TODO.txt
-src/burnand/settings.clj
