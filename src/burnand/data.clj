@@ -69,9 +69,6 @@
                             {mo/$set {:products.$ new-product}})]
         result))
 
-(defn db-delete-booking [id]
-  nil)
-
 (defn rate [room]
     (get (get-room room) :rate))
 

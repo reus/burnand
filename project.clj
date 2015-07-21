@@ -14,4 +14,5 @@
                  [org.clojure/data.csv "0.1.2"]
                  [com.novemberain/monger "1.5.0"]
                  [clj-time "0.6.0"]
-                 [enlive "1.1.4"]])
+                 [enlive "1.1.4"]]
+  :main burnand.core)

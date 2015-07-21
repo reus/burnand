@@ -160,11 +160,13 @@
        [{id :_id
          nm :guestName
          check-in-date :checkInDate
+         booking-type :bookingType
          nights :nights :as booking} bookings]
           [:tr.value] (html/set-attr :id (int id))
-          [:.name] (html/content nm)
-          [:.check-in-date] (html/content (utils/date-short check-in-date))
-          [:.rooms] (html/content (data/rooms-per-booking booking))))
+          [:.check-in-date :span] (html/content (utils/date-short check-in-date))
+          [:.name :span] (html/content nm)
+          [:.type :span] (html/content booking-type)
+          [:.rooms :span] (html/content (data/rooms-per-booking booking))))
 
 (html/deftemplate new-booking "public/new_booking.html" []
   [:#booking_type :option] (html/do-> 
