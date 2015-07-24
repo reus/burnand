@@ -3,11 +3,16 @@
             [monger.collection :as mc]
             [monger.operators :as mo]
             [monger.query :as mq]
+            [clj-time.core :as tm]
             [clojure.java.io :as io]
             [burnand.utils :as utils]
             [burnand.misc :as misc]
             [burnand.settings :as settings])
   (:import org.bson.types.ObjectId))
+
+(defn mongo-connect [location]
+  (println "Connecting to database...")
+  (mg/connect-via-uri! location))
 
 (defn all-bookings []
   (mc/find-maps "bookings"))
@@ -20,10 +25,6 @@
 (defn get-booking [id]
   (mc/find-one-as-map "bookings" {:_id id}))
 
-(defn mongo-connect [location]
-  (println "Connecting to database...")
-  (mg/connect-via-uri! location))
-
 (defn query-rooms []
   (mc/find-maps "rooms"))
 
@@ -32,7 +33,9 @@
     (m id)))
 
 (defn rooms-per-booking [{products :products}]
-  (apply str (interpose ", " (map keyword-to-room-name (distinct (map #(keyword (:room %)) (filter #(= (:type %) "room") products)))))))
+  (apply str (interpose ", "
+                        (map keyword-to-room-name
+                             (distinct (map #(keyword (:room %)) (filter #(= (:type %) "room") products)))))))
 
 (defn get-product-description [p]
   (case (:type p)
@@ -262,3 +265,22 @@
       (if (some #{t} '("airbnb" "booking.com"))
         (mc/update-by-id "bookings" i {mo/$set {:taxInclusive true}})
         (mc/update-by-id "bookings" i {mo/$set {:taxInclusive false}})))))
+
+(defn get-nights []
+  (let [bookings (mq/with-collection "bookings"
+                   (mq/find {:checkInDate {mo/$gte (tm/date-time 2015 01 01)}})
+                   (mq/fields {:guestName 1
+                                :products.date 1
+                                :products.type 1
+                                :products.description 1
+                                :products.persons 1
+                                :products.taxed 1})
+                   (mq/sort (array-map :checkInDate 1)))]
+    (mapcat #(for [product (:products %)
+                :when (= "room" (:type product))]
+            {:id (:_id %)
+             :date (utils/date-short (:date product))
+             :guest (:guestName %)
+             :room (:description product)
+             :persons (:persons product)
+             :taxed (:taxed product)}) bookings)))

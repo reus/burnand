@@ -215,3 +215,13 @@
 
 (html/deftemplate rooms "public/rooms.html" []
   [:#room] (html/content (html/html [:option.room])))
+
+(html/deftemplate tax "public/tax.html" [nights]
+  [:table :tr.value] (html/clone-for
+                       [night nights]
+                       [:tr.value] (html/set-attr :id (:id night))
+                       [:.date :span] (html/content (:date night))
+                       [:.name :span] (html/content (:guest night))
+                       [:.room :span] (html/content (:room night))
+                       [:.persons :span] (html/content (str (:persons night)))
+                       [:.taxed :input] (html/set-attr :value (:taxed night))))

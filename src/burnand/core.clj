@@ -216,6 +216,9 @@
                             :headers {"charset" "UTF-8" "Content-type" "text/html"}
                             :body (io/file (str (:dir settings/invoice-location) id))})
   (GET "/rooms" [] (temp/rooms))
+  (GET "/tax" [] (do
+                   (println (data/get-nights))
+                   (temp/tax (data/get-nights))))
   (POST "/save-products" {params :params} (ring-save-products params))
   (POST "/save-general" {params :params} (ring-save-general params))
   (POST "/new" {params :params} (ring-save-booking params))
