@@ -224,4 +224,10 @@
                        [:.name :span] (html/content (:guest night))
                        [:.room :span] (html/content (:room night))
                        [:.persons :span] (html/content (str (:persons night)))
-                       [:.taxed :input] (html/set-attr :value (:taxed night))))
+                       [:.taxed :input] (html/set-attr :value (:taxed night)
+                                                       :name (str (:booking-id night) ":" (:id night)))))
+
+(html/deftemplate fees "public/fees.html" [booking]
+  [:.fee] (html/clone-for [fee (:fees booking)]
+                          [:.type] (html/content (:type fee))))
+

@@ -195,6 +195,19 @@
   (let [bookings (data/query-bookings)]
     (create-csv-file bookings filename)))
 
+(defn ring-save-tax [{params :params}]
+  (doseq [p params]
+    (let [[ids n] p
+          [booking-id product-id] (clojure.string/split ids #":")
+          result (data/update-taxed (read-string booking-id)
+                                    (str product-id)
+                                    (read-string n))]
+      result))
+  {:status 200
+   :content "<html></html>"
+   :headers {"Content-Type" "text/html"}})
+
+
 (defroutes routes
   ;(GET "/" [] (resp/file-response "index.html" {:root "resources/public"})) 
   (GET "/" {params :params} (bookings-overview params))
@@ -216,9 +229,9 @@
                             :headers {"charset" "UTF-8" "Content-type" "text/html"}
                             :body (io/file (str (:dir settings/invoice-location) id))})
   (GET "/rooms" [] (temp/rooms))
-  (GET "/tax" [] (do
-                   (println (data/get-nights))
-                   (temp/tax (data/get-nights))))
+  (GET "/tax" [] (temp/tax (data/get-nights)))
+  (POST "/tax" request (ring-save-tax request))
+  (GET "/fees/:id" [id] (temp/fees (data/get-booking (read-string id))))
   (POST "/save-products" {params :params} (ring-save-products params))
   (POST "/save-general" {params :params} (ring-save-general params))
   (POST "/new" {params :params} (ring-save-booking params))

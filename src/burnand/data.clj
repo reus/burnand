@@ -270,17 +270,24 @@
   (let [bookings (mq/with-collection "bookings"
                    (mq/find {:checkInDate {mo/$gte (tm/date-time 2015 01 01)}})
                    (mq/fields {:guestName 1
-                                :products.date 1
-                                :products.type 1
-                                :products.description 1
-                                :products.persons 1
-                                :products.taxed 1})
+                               :products._id 1
+                               :products.date 1
+                               :products.type 1
+                               :products.description 1
+                               :products.persons 1
+                               :products.taxed 1})
                    (mq/sort (array-map :checkInDate 1)))]
     (mapcat #(for [product (:products %)
                 :when (= "room" (:type product))]
-            {:id (:_id %)
+            {:id (.toString (:_id product))
+             :booking-id (:_id %)
              :date (utils/date-short (:date product))
              :guest (:guestName %)
              :room (:description product)
              :persons (:persons product)
              :taxed (:taxed product)}) bookings)))
+
+(defn update-taxed [booking-id product-id taxed]
+  (mc/update "bookings"
+             {:_id booking-id :products._id (org.bson.types.ObjectId. product-id)}
+             {mo/$set {:products.$.taxed taxed}}))
