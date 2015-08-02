@@ -28,17 +28,17 @@
   (data/db-save-booking params)
   (resp/redirect "/"))
 
-(defn bookings-overview [params]
+(defn ring-bookings-overview [params]
   "Ring handler for home page. Returns html with a list of bookings."
   (if (and (:q params) (not (empty? (:q params))))
     (let [query (read-string (:q params))]
       (if (number? query)
         (let [booking (data/get-booking query)]
           (if-not (nil? booking)
-            (temp/ring-bookings-overview [booking])
-            (temp/ring-bookings-overview [])))
-        (temp/ring-bookings-overview (data/query-bookings))))
-    (temp/ring-bookings-overview (data/query-bookings))))
+            (temp/bookings-overview [booking])
+            (temp/bookings-overview [])))
+        (temp/bookings-overview (data/query-bookings))))
+    (temp/bookings-overview (data/query-bookings))))
 
 (defn get-products-formatted [booking-id]
   "Returns a map of the products of given booking 
@@ -171,6 +171,19 @@
      :body (json/write-str invoice)
      :headers {"Content-Type" "application/json"}}))
 
+(defn ring-add-fee [])
+
+(defn ring-process-fee [params]
+  (println params)
+  (if (= "remove" (:action params))
+    (data/delete-fee (read-string (:booking-id params))
+                     (org.bson.types.ObjectId. (:id params)))
+    (if (= "add" (:action params))
+      (data/add-fee (read-string (:booking-id params))
+                    (:feetype params)
+                    (float (read-string (:amount params))))))
+  (resp/redirect (str "/fees/" (:booking-id params))))
+
 (defn csv-format [booking]
   [(utils/date-short (:checkInDate booking))
    (:_id booking)
@@ -210,13 +223,13 @@
 
 (defroutes routes
   ;(GET "/" [] (resp/file-response "index.html" {:root "resources/public"})) 
-  (GET "/" {params :params} (bookings-overview params))
+  (GET "/" {params :params} (ring-bookings-overview params))
   (GET "/booking" [] (temp/new-booking))
   (GET "/booking/:id" [id] (let [bid (read-string id)
                                  booking (data/get-booking bid)]
                              (if booking
                                (let [totals (misc/booking-totals booking)]
-                                 (temp/ring-booking-details booking totals))
+                                 (temp/booking-details booking totals))
                                {:body (str "Could not find booking with id " id)})))
   (POST "/add-invoice" {params :params} (ring-add-invoice params))
   (POST "/add-payment" {params :params} (ring-add-payment params))
@@ -232,6 +245,7 @@
   (GET "/tax" [] (temp/tax (data/get-nights)))
   (POST "/tax" request (ring-save-tax request))
   (GET "/fees/:id" [id] (temp/fees (data/get-booking (read-string id))))
+  (POST "/fees" {params :params} (ring-process-fee params))
   (POST "/save-products" {params :params} (ring-save-products params))
   (POST "/save-general" {params :params} (ring-save-general params))
   (POST "/new" {params :params} (ring-save-booking params))

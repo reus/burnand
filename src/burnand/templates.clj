@@ -11,7 +11,7 @@
                  " par ")]
     (str "Acompte versé le " (utils/date-short (:date payment)) prefix (:method payment))))
 
-(html/deftemplate ring-booking-details "public/booking.html" [booking totals]
+(html/deftemplate booking-details "public/booking.html" [booking totals]
   [:#name] (html/content (booking :guestName))
   [:#booking_id] (html/content (str (int (booking :_id))))
   [:.guestName :.value :span] (html/content (booking :guestName))
@@ -154,7 +154,7 @@
   [:#paye] (if paid (html/set-attr :id "paye"))
   [:#bank_info] (html/html-content settings/bank-info))
 
-(html/deftemplate ring-bookings-overview "public/index.html" [bookings]
+(html/deftemplate bookings-overview "public/index.html" [bookings]
   [:#tbl_bookings :tr.value]
      (html/clone-for
        [{id :_id
@@ -228,6 +228,15 @@
                                                        :name (str (:booking-id night) ":" (:id night)))))
 
 (html/deftemplate fees "public/fees.html" [booking]
+  [:#booking-id] (html/content (str (:_id booking)))
+  [:#bid] (html/set-attr :value (:_id booking))
+  [:#name] (html/content (:guestName booking))
+  [:#feetype :option.placeholder] (html/clone-for [feetype settings/fees]
+                                                  (html/do-> (html/content feetype)
+                                                             (html/set-attr :value feetype)
+                                                             (html/remove-class "placeholder")))
   [:.fee] (html/clone-for [fee (:fees booking)]
-                          [:.type] (html/content (:type fee))))
+                          [:.fee] (html/set-attr :id (:_id fee))
+                          [:.type] (html/content (:type fee))
+                          [:.amount] (html/content (format "%.2f" (:amount fee)))))
 

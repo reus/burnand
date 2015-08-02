@@ -247,12 +247,25 @@
                  :date date
                  :method method
                  :amount amount}]
-  (mc/update "bookings"
-             {:_id b-id}
-             {mo/$push {:payments payment}})
+    (mc/update "bookings"
+               {:_id b-id}
+               {mo/$push {:payments payment}})
     (assoc payment :date (utils/date-short (:date payment))
                    :_id (.toString (:_id payment))
                    :amount (format "%.2f" (:amount payment)))))
+
+(defn delete-fee [booking-id fee-id]
+  (mc/update "bookings" {:_id booking-id}
+             {mo/$pull {:fees {:_id fee-id}}}))
+
+(defn add-fee [booking-id feetype amount]
+  (let [fee {:_id (ObjectId.)
+             :type feetype
+             :amount amount}]
+    (mc/update "bookings"
+               {:_id booking-id}
+               {mo/$push {:fees fee}})))
+
 
 (defn update-bookings-tax []
   (doseq ;[b (query-bookings (tm/date-time 2014 7 1) (tm/date-time 2014 8 31))]
