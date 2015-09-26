@@ -10,9 +10,9 @@
             [burnand.settings :as settings])
   (:import org.bson.types.ObjectId))
 
-(defn mongo-connect [location]
-  (println "Connecting to database...")
-  (mg/connect-via-uri! location))
+(defn mongo-connect []
+  (let [conn (mg/connect!)
+        db  (mg/set-db! (mg/get-db "burnand"))]))
 
 (defn all-bookings []
   (mc/find-maps "bookings"))

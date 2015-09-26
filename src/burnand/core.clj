@@ -256,5 +256,5 @@
 (def application (handler/site routes))
 
 (defn -main []
-  (data/mongo-connect settings/mongo-uri)
+  (data/mongo-connect) 
   (run-server application {:port 8090 :join? false}))
