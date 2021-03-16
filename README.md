@@ -6,4 +6,4 @@ Technology: Clojure, MongoDB.
 
 ## Usage
 
-demo: http://www.reus.io
+demo with example data: http://www.reus.io
